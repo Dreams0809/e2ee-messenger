@@ -1,0 +1,65 @@
+"""Thin, hard-to-misuse wrappers around the crypto library.
+
+Every other module in this project should call these functions
+instead of touching the `cryptography` library directly.
+"""
+import os
+
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric.x25519 import (
+    X25519PrivateKey,
+    X25519PublicKey,
+)
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+KEY_SIZE = 32    # bytes (256-bit keys)
+NONCE_SIZE = 12  # bytes (required by ChaCha20-Poly1305)
+
+
+class DecryptionError(Exception):
+    """Raised when a message fails authentication or is malformed."""
+
+
+def generate_keypair() -> tuple[X25519PrivateKey, X25519PublicKey]:
+    private = X25519PrivateKey.generate()
+    return private, private.public_key()
+
+
+def dh(private: X25519PrivateKey, public: X25519PublicKey) -> bytes:
+    """Diffie-Hellman: combine my private key with their public key."""
+    return private.exchange(public)
+
+
+def kdf(secret: bytes, info: bytes, length: int = KEY_SIZE,
+        salt: bytes | None = None) -> bytes:
+    """Derive a key from a secret. `info` labels what the key is for."""
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=length,
+        salt=salt,
+        info=info,
+    ).derive(secret)
+
+
+def encrypt(key: bytes, plaintext: bytes, associated_data: bytes = b"") -> bytes:
+    """Encrypt and authenticate. Returns nonce || ciphertext."""
+    if len(key) != KEY_SIZE:
+        raise ValueError(f"key must be {KEY_SIZE} bytes")
+    nonce = os.urandom(NONCE_SIZE)
+    ciphertext = ChaCha20Poly1305(key).encrypt(nonce, plaintext, associated_data)
+    return nonce + ciphertext
+
+
+def decrypt(key: bytes, blob: bytes, associated_data: bytes = b"") -> bytes:
+    """Verify and decrypt a blob produced by encrypt()."""
+    if len(key) != KEY_SIZE:
+        raise ValueError(f"key must be {KEY_SIZE} bytes")
+    if len(blob) < NONCE_SIZE + 16:  # 16 = Poly1305 tag size
+        raise DecryptionError("message too short")
+    nonce, ciphertext = blob[:NONCE_SIZE], blob[NONCE_SIZE:]
+    try:
+        return ChaCha20Poly1305(key).decrypt(nonce, ciphertext, associated_data)
+    except InvalidTag:
+        raise DecryptionError("authentication failed") from None

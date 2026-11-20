@@ -1,0 +1,47 @@
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+import os
+
+# --- Primitive 1: Diffie-Hellman key exchange (X25519) ---
+alice_private = X25519PrivateKey.generate()
+alice_public = alice_private.public_key()
+
+bob_private = X25519PrivateKey.generate()
+bob_public = bob_private.public_key()
+
+# Each side combines THEIR private key with the OTHER side's public key.
+alice_shared = alice_private.exchange(bob_public)
+bob_shared = bob_private.exchange(alice_public)
+
+assert alice_shared == bob_shared
+print("Shared secret matches:", alice_shared.hex()[:16], "...")
+
+# --- Primitive 2: Key derivation (HKDF) ---
+# The raw DH output is not a good encryption key. We "clean" it with HKDF.
+key = HKDF(
+    algorithm=hashes.SHA256(),
+    length=32,
+    salt=None,
+    info=b"e2ee-messenger step1",  # labels what this key is for
+).derive(alice_shared)
+
+# --- Primitive 3: Authenticated encryption (ChaCha20-Poly1305) ---
+aead = ChaCha20Poly1305(key)
+nonce = os.urandom(12)                       # must NEVER repeat for the same key
+plaintext = b"hello bob"
+associated_data = b"alice->bob"              # authenticated but not encrypted
+
+ciphertext = aead.encrypt(nonce, plaintext, associated_data)
+print("Ciphertext:", ciphertext.hex())
+
+print("Decrypted:", aead.decrypt(nonce, ciphertext, associated_data))
+
+# --- Tamper test: flip one bit ---
+tampered = bytearray(ciphertext)
+tampered[0] ^= 1
+try:
+    aead.decrypt(nonce, bytes(tampered), associated_data)
+except Exception as e:
+    print("Tampering detected:", type(e).__name__)
